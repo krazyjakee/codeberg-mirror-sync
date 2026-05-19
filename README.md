@@ -1,41 +1,36 @@
 # codeberg-mirror-sync
 
-Cloud-based one-way sync of GitHub repos → Codeberg, using **Codeberg pull-mirrors**.
+Cloud-based one-way **push** mirror of GitHub repos → Codeberg.
+
+> Codeberg disabled site-wide creation of *pull* mirrors, so syncing must be
+> push-based: a plain Codeberg repo is created and pushed to from CI.
 
 ## How it works
 
-A scheduled GitHub Actions workflow ([`.github/workflows/mirror.yml`](.github/workflows/mirror.yml)):
+Scheduled GitHub Actions workflow ([`.github/workflows/mirror.yml`](.github/workflows/mirror.yml)):
 
-1. Lists all **public, non-fork, non-archived** repos owned by `krazyjakee`.
-2. For each repo missing on Codeberg, calls the Codeberg migration API to create
-   a **pull-mirror** (`mirror: true`, interval `8h`).
-3. For repos already mirrored, triggers an immediate `mirror-sync`.
+1. Lists **public, non-fork, non-archived** repos owned by `krazyjakee`, plus
+   the explicitly pinned `EXTRA_REPOS` (`godot-mog`, `MoGen`,
+   `DungeonTemplateLibrary-Godot`).
+2. Ensures a plain Codeberg repo exists for each (creates via API if missing).
+3. `git clone --mirror` from GitHub, then `git push --prune` of all
+   `refs/heads/*` and `refs/tags/*` to Codeberg — a **full mirror** (all
+   branches + tags; deletions propagate). PR refs are excluded.
 
-After a mirror exists, **Codeberg itself** pulls from GitHub every ~8h with no
-further help from this workflow. The workflow only provisions new mirrors and
-nudges existing ones; new public repos auto-onboard on the next daily run.
-
-Mirrors are **full** (all branches + tags) — Codeberg pull-mirrors cannot be
-restricted to a single branch.
+New public repos auto-onboard on the next daily run.
 
 ## Schedule
 
-- Daily at `04:17 UTC` (cron).
-- Manual via the **Run workflow** button (`workflow_dispatch`).
+- Daily at `04:17 UTC` (cron) and on-demand via **Run workflow**.
 
 ## Setup
 
-The Codeberg token is stored as the repo secret **`CODEBERG_TOKEN`** and needs
-the `write:repository` scope (to create mirrors). No GitHub token is configured
-on Codeberg's side because only public repos are mirrored.
+- Repo is **public** so GitHub-hosted Actions minutes are free.
+- Codeberg token stored as the encrypted repo secret **`CODEBERG_TOKEN`**
+  (`write:repository` scope). No token is ever committed.
 
-## Caveat
+## Direction & caveats
 
-Per Codeberg's usage policy, Codeberg should not be used *purely* as a passive
-backup/mirror of projects with no Codeberg engagement. Keep this for projects
-you actually maintain a presence for on Codeberg.
-
-## Direction
-
-One-way, GitHub → Codeberg. Pushes made directly on Codeberg mirrors are
-overwritten on the next pull.
+One-way, GitHub → Codeberg. Anything pushed directly to a Codeberg mirror is
+overwritten on the next run. Per Codeberg policy, don't use Codeberg purely as a
+passive backup of projects with no Codeberg presence.

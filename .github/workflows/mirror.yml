@@ -1,4 +1,4 @@
-name: Sync GitHub repos to Codeberg mirrors
+name: Sync GitHub repos to Codeberg
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:        # manual "Run workflow" button
 
 permissions:
-  contents: read            # only needs to read public repo metadata
+  contents: read            # only reads public repo metadata
 
 concurrency:
   group: codeberg-mirror
@@ -20,62 +20,71 @@ jobs:
       CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
       CODEBERG_OWNER: krazyjakee
       GITHUB_OWNER: krazyjakee
-      MIRROR_INTERVAL: 8h
+      # Repos always included even if fork/archived:
+      EXTRA_REPOS: "godot-mog MoGen DungeonTemplateLibrary-Godot"
     steps:
-      - name: Provision Codeberg pull-mirrors
+      - name: Push-mirror GitHub repos to Codeberg
         run: |
           set -euo pipefail
-          api="https://codeberg.org/api/v1"
-          auth="Authorization: token ${CODEBERG_TOKEN}"
+          cbapi="https://codeberg.org/api/v1"
+          cbauth="Authorization: token ${CODEBERG_TOKEN}"
 
-          # Eligible: public, non-fork, non-archived repos owned by the user.
+          # Eligible: public, non-fork, non-archived repos owned by the user,
+          # plus the explicitly requested EXTRA_REPOS.
           mapfile -t repos < <(gh repo list "$GITHUB_OWNER" \
             --source --no-archived --visibility public \
-            --limit 1000 --json name -q '.[].name' | sort)
+            --limit 1000 --json name -q '.[].name')
+          for r in $EXTRA_REPOS; do
+            printf '%s\n' "${repos[@]}" | grep -qxF "$r" || repos+=("$r")
+          done
+          mapfile -t repos < <(printf '%s\n' "${repos[@]}" | sort -u)
+          echo "Mirroring ${#repos[@]} repos"
 
-          echo "Found ${#repos[@]} eligible GitHub repos"
-          created=0; synced=0; skipped=0
+          created=0; pushed=0; failed=0
+          work="$(mktemp -d)"
 
           for name in "${repos[@]}"; do
-            code=$(curl -fsS -o /dev/null -w '%{http_code}' \
-              -H "$auth" "$api/repos/$CODEBERG_OWNER/$name" || echo 000)
+            echo "::group::$name"
 
-            case "$code" in
-              200)
-                # Already on Codeberg — ask it to pull from GitHub now.
-                if curl -fsS -X POST -H "$auth" \
-                     "$api/repos/$CODEBERG_OWNER/$name/mirror-sync" >/dev/null 2>&1; then
-                  echo "= $name: mirror-sync triggered"
-                  synced=$((synced+1))
-                else
-                  echo "= $name: exists but not a mirror (or no perm) — leaving alone"
-                  skipped=$((skipped+1))
-                fi
-                ;;
-              404)
-                payload=$(jq -nc \
-                  --arg clone "https://github.com/$GITHUB_OWNER/$name.git" \
-                  --arg name  "$name" \
-                  --arg iv    "$MIRROR_INTERVAL" \
-                  --arg desc  "Mirror of https://github.com/$GITHUB_OWNER/$name" \
-                  '{clone_addr:$clone, repo_name:$name, service:"github",
-                    mirror:true, mirror_interval:$iv, private:false,
-                    wiki:false, description:$desc}')
-                if curl -fsS -X POST -H "$auth" -H 'Content-Type: application/json' \
-                     "$api/repos/migrate" -d "$payload" >/dev/null; then
-                  echo "+ $name: Codeberg pull-mirror created"
-                  created=$((created+1))
-                else
-                  echo "! $name: migrate call failed"
-                  skipped=$((skipped+1))
-                fi
-                ;;
-              *)
-                echo "! $name: unexpected Codeberg status $code — skipping"
-                skipped=$((skipped+1))
-                ;;
-            esac
+            # 1. Ensure a plain (non-mirror) Codeberg repo exists.
+            code=$(curl -fsS -o /dev/null -w '%{http_code}' \
+              -H "$cbauth" "$cbapi/repos/$CODEBERG_OWNER/$name" || echo 000)
+            if [ "$code" = "404" ]; then
+              payload=$(jq -nc \
+                --arg n "$name" \
+                --arg d "Mirror of https://github.com/$GITHUB_OWNER/$name" \
+                '{name:$n, private:false, description:$d, auto_init:false}')
+              if curl -fsS -o /dev/null -X POST -H "$cbauth" \
+                   -H 'Content-Type: application/json' \
+                   "$cbapi/user/repos" -d "$payload"; then
+                echo "+ created Codeberg repo $name"
+                created=$((created+1))
+              else
+                echo "! failed to create Codeberg repo $name"
+                failed=$((failed+1)); echo "::endgroup::"; continue
+              fi
+            elif [ "$code" != "200" ]; then
+              echo "! unexpected Codeberg status $code for $name"
+              failed=$((failed+1)); echo "::endgroup::"; continue
+            fi
+
+            # 2. Mirror clone from GitHub and push heads+tags to Codeberg.
+            src="https://github.com/$GITHUB_OWNER/$name.git"
+            dst="https://$CODEBERG_OWNER:$CODEBERG_TOKEN@codeberg.org/$CODEBERG_OWNER/$name.git"
+            if git clone --quiet --mirror "$src" "$work/$name.git" \
+               && git -C "$work/$name.git" push --quiet --prune "$dst" \
+                    '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'; then
+              echo "= pushed $name"
+              pushed=$((pushed+1))
+            else
+              echo "! push failed for $name"
+              failed=$((failed+1))
+            fi
+            rm -rf "$work/$name.git"
+            echo "::endgroup::"
           done
 
+          rm -rf "$work"
           echo "---"
-          echo "created=$created synced=$synced skipped=$skipped"
+          echo "created=$created pushed=$pushed failed=$failed"
+          [ "$failed" -eq 0 ]
