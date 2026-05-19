@@ -40,7 +40,7 @@ jobs:
           mapfile -t repos < <(printf '%s\n' "${repos[@]}" | sort -u)
           echo "Mirroring ${#repos[@]} repos"
 
-          created=0; pushed=0; failed=0
+          created=0; pushed=0; failed=0; deferred=0
           work="$(mktemp -d)"
 
           for name in "${repos[@]}"; do
@@ -54,14 +54,24 @@ jobs:
                 --arg n "$name" \
                 --arg d "Mirror of https://github.com/$GITHUB_OWNER/$name" \
                 '{name:$n, private:false, description:$d, auto_init:false}')
-              if curl -fsS -o /dev/null -X POST -H "$cbauth" \
-                   -H 'Content-Type: application/json' \
-                   "$cbapi/user/repos" -d "$payload"; then
+              # Codeberg rate-limits new-repo creation (opaque 5xx once the
+              # window is exhausted). Retry a little; if still throttled,
+              # DEFER — the next scheduled run will create it. Not a failure.
+              cstatus=000
+              for try in 1 2 3; do
+                cstatus=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+                  -H "$cbauth" -H 'Content-Type: application/json' \
+                  "$cbapi/user/repos" -d "$payload")
+                [ "$cstatus" = "201" ] && break
+                [ "$cstatus" = "409" ] && break   # already exists (race)
+                sleep $((try*20))
+              done
+              if [ "$cstatus" = "201" ] || [ "$cstatus" = "409" ]; then
                 echo "+ created Codeberg repo $name"
                 created=$((created+1))
               else
-                echo "! failed to create Codeberg repo $name"
-                failed=$((failed+1)); echo "::endgroup::"; continue
+                echo "~ deferred $name (Codeberg create throttled, HTTP $cstatus) — retries next run"
+                deferred=$((deferred+1)); echo "::endgroup::"; continue
               fi
             elif [ "$code" != "200" ]; then
               echo "! unexpected Codeberg status $code for $name"
@@ -86,5 +96,9 @@ jobs:
 
           rm -rf "$work"
           echo "---"
-          echo "created=$created pushed=$pushed failed=$failed"
+          echo "created=$created pushed=$pushed deferred=$deferred failed=$failed"
+          if [ "$deferred" -gt 0 ]; then
+            echo "::notice::$deferred repo(s) deferred by Codeberg create throttle; next run will retry."
+          fi
+          # Only genuine push/unexpected errors fail the job; throttle is normal.
           [ "$failed" -eq 0 ]
