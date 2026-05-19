@@ -47,8 +47,8 @@ jobs:
             echo "::group::$name"
 
             # 1. Ensure a plain (non-mirror) Codeberg repo exists.
-            code=$(curl -fsS -o /dev/null -w '%{http_code}' \
-              -H "$cbauth" "$cbapi/repos/$CODEBERG_OWNER/$name" || echo 000)
+            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "$cbauth" "$cbapi/repos/$CODEBERG_OWNER/$name")
             if [ "$code" = "404" ]; then
               payload=$(jq -nc \
                 --arg n "$name" \
